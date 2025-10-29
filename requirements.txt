@@ -1,0 +1,6 @@
+pandas
+pytesseract
+PyMuPDF
+Pillow
+reportlab
+pdfplumber
