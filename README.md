@@ -1,57 +1,51 @@
-# מערכת עיבוד דוחות נוכחות – יצירת וריאציה אמינה
+# Attendance Variation – PDF in/PDF out
 
-## התקנה מהירה
+## Prerequisites
+- Python 3.10+
+- Tesseract OCR with Hebrew data
+  - Windows: download and install from `https://github.com/UB-Mannheim/tesseract/wiki`
+    - Default path used by the code: `C:\Program Files\Tesseract-OCR\tesseract.exe`
+    - During install, include Hebrew language (heb)
+  - macOS: `brew install tesseract tesseract-lang`
+  - Linux (Debian/Ubuntu): `sudo apt-get install tesseract-ocr tesseract-ocr-heb`
 
+## Install
 ```bash
 pip install -r requirements.txt
 ```
 
-חשוב: יש להתקין Tesseract OCR ולהגדיר עברית.
-- Windows: התקן מ־`https://github.com/UB-Mannheim/tesseract/wiki`
-- Linux: `sudo apt-get install tesseract-ocr tesseract-ocr-heb`
-- macOS: `brew install tesseract tesseract-lang`
-
-ב־Windows ודא שהנתיב נכון בקובץ `report_utils.py` (ברירת מחדל: `C:\Program Files\Tesseract-OCR\tesseract.exe`).
-
-## שימוש
-
-```bash
-python main.py                 # יעבד את כל הקבצים בתיקיית input_reports
-python main.py sample_type_A.pdf   # קובץ יחיד
-```
-
-הקבצים המעובדים יישמרו בתיקייה `output_reports` עם סיומת `_variation.pdf`.
-
-## מה המערכת עושה
-- זיהוי סוג הדו"ח בעזרת OCR של העמוד הראשון לפי הופעת "שבת" (Type A אם מופיע, אחרת Type B).
-- חילוץ טבלה מכל העמודים עם עמודות: `date`, `start`, `end`, `hours`.
-- החלת חוקים דטרמיניסטיים שמייצרים וריאציה אמינה:
-  - הזזות דקות קטנות לפי סוג הדו"ח והיום (ללא אקראיות).
-  - הבטחת `end > start` (עם טיפול בלילה).
-  - תחימת שעות יומיות לטווח סביר [4.0, 12.0].
-- יצירת PDF חדש עם מבנה תואם לפי סוג הדו"ח:
-  - Type A: עמודות תאריך/כניסה/יציאה/שעות/שבת.
-  - Type B: עמודות תאריך/כניסה/יציאה/שעות.
-  - כותרת, טבלה ממוסדרת וסיכומי שעות וימי עבודה.
-
-## מבנה הקבצים
-
-```
-├── main.py           # הרצה, זיהוי סוג, ייצור PDF
-├── report_utils.py   # OCR, חילוץ טבלה, רישום פונט עברי
-├── rules.py          # החוקים ליצירת וריאציה
-├── input_reports/    # קבצי PDF מקור
-└── output_reports/   # קבצי PDF תוצר
-```
-
-## תקלות נפוצות
-- Tesseract לא נמצא: עדכן את הנתיב ב־`report_utils.py` או התקן עברית.
-- עברית לא מוצגת: המערכת מנסה לרשום פונט `DejaVuSans`/`Arial`. אם לא נמצא, נעשה שימוש ב־Helvetica שעשוי לא לתמוך בעברית.
-
-## דוגמת הרצה
-
+## Run
+Process all PDFs in `input_reports`:
 ```bash
 python main.py
 ```
+Process a single file:
+```bash
+python main.py sample_type_A.pdf
+```
+Outputs are written to `output_reports` as `<name>_variation.pdf` only (no CSV/TXT artifacts).
 
-התוצר יופיע כ־`output_reports/<name>_variation.pdf`.
+## What it does
+- Reads the original PDF (native text first, OCR fallback) across all pages
+- Extracts the attendance table and applies minimal, deterministic validation rules
+  - Preserves extracted `start`/`end`/`hours` when sensible; fixes only invalid rows
+- Detects report type by structure (A/B)
+  - Type A: many dates + blocks of repeated times
+- Generates a new PDF that mirrors the original layout order with the varied data
+  - Columns shown by type:
+    - Type A: date, weekday, start, end, hours, break, שבת
+    - Type B: date, weekday, start, end, hours (no break, no שבת)
+
+## Project structure
+```
+├── main.py            # Orchestration (read → extract → rules → write)
+├── report_utils.py    # AttendancePDFReader (PDF/OCR), AttendanceTableExtractor (parsing)
+├── rules.py           # AttendanceVariationRules (minimal corrections, weekday/שבת)
+├── report_writer.py   # AttendancePDFWriter (pagination, dynamic columns, totals)
+├── input_reports/     # Source PDFs
+└── output_reports/    # Result PDFs
+```
+
+## Troubleshooting
+- Tesseract not found on Windows: verify `C:\Program Files\Tesseract-OCR\tesseract.exe`. If installed elsewhere, update the path in `report_utils.py`.
+- Hebrew glyphs missing in output: ensure a Hebrew-capable font exists (the code tries `Arial` then `DejaVuSans`).
