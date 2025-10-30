@@ -1,106 +1,114 @@
-def apply_rules(df, report_type):
-    """
-    Apply deterministic, reasonable, per-type modifications to the attendance data.
-    Goals:
-    - Keep structure: date, start, end, hours
-    - Ensure end > start (allowing overnight by +24h)
-    - Deterministically perturb times based on date and type (no randomness)
-    - Clamp daily hours to a realistic range [4.0, 12.0]
-    - Preserve missing/invalid rows gracefully
+from datetime import datetime, timedelta
+import hashlib
+import pandas as pd
 
-    Returns: (new_df, log)
-    """
-    from datetime import datetime, timedelta
-    import hashlib
+class AttendanceVariationRules:
+    def apply(self, df, report_type):
+        if df.empty:
+            return pd.DataFrame(), []
 
-    def parse_time_safe(value: str):
-        try:
-            return datetime.strptime(value, "%H:%M")
-        except Exception:
-            return None
+        def parse_time(value: str):
+            try:
+                return datetime.strptime(value, "%H:%M")
+            except Exception:
+                return None
 
-    def deterministic_minutes(date_text: str, base: int) -> int:
-        """Map date string to a small minute delta deterministically."""
-        key = f"{report_type}|{date_text}|{base}".encode("utf-8")
-        h = hashlib.sha256(key).hexdigest()
-        # Map to {-10, -5, 0, +5, +10} minutes
-        bucket = int(h[:2], 16) % 5
-        return [-10, -5, 0, 5, 10][bucket]
+        def compute_hours(t0: datetime, t1: datetime) -> float:
+            delta = (t1 - t0).total_seconds() / 3600
+            if delta < 0:
+                delta += 24  # overnight
+            return round(delta, 2)
 
-    new_rows = []
-    log = []
+        new_rows, log = [], []
+        for i, row in df.iterrows():
+            date = row.get("date", "")
+            start = str(row.get("start", "") or "")
+            end = str(row.get("end", "") or "")
+            hours_val = row.get("hours", 0) or 0.0
 
-    for i, row in df.iterrows():
-        date_text = str(row.get("date", "")).strip()
-        start_text = str(row.get("start", "")).strip()
-        end_text = str(row.get("end", "")).strip()
+            t0 = parse_time(start)
+            t1 = parse_time(end)
 
-        t_start = parse_time_safe(start_text)
-        t_end = parse_time_safe(end_text)
+            # Case 1: both times present and sensible → keep as-is
+            if t0 and t1:
+                hours_computed = compute_hours(t0, t1)
+                if 0.25 <= hours_computed <= 16:
+                    new_rows.append({
+                        "date": date,
+                        "start": start,
+                        "end": end,
+                        "hours": round(hours_computed, 2),
+                        "break": row.get("break", ""),
+                        "raw_line": row.get("raw_line", ""),
+                    })
+                    log.append(f"Row {i}: kept {start}-{end} ({hours_computed:.2f}h)")
+                    continue
+                # If out of range, minimally fix: ensure end after start by 30m
+                t1_fixed = t0 + timedelta(minutes=30)
+                hours_fixed = compute_hours(t0, t1_fixed)
+                new_rows.append({
+                    "date": date,
+                    "start": start,
+                    "end": t1_fixed.strftime("%H:%M"),
+                    "hours": hours_fixed,
+                    "break": row.get("break", ""),
+                    "raw_line": row.get("raw_line", ""),
+                })
+                log.append(f"Row {i}: fixed end to {t1_fixed.strftime('%H:%M')} (was {end})")
+                continue
 
-        # If both times exist, apply per-type perturbations
-        if t_start and t_end:
-            # Base deterministic deltas
-            start_delta = deterministic_minutes(date_text, 1)
-            end_delta = deterministic_minutes(date_text, 2)
+            # Case 2: only one time present → keep time, hours 0.0
+            if t0 and not t1:
+                new_rows.append({
+                    "date": date,
+                    "start": start,
+                    "end": end,
+                    "hours": 0.0,
+                    "break": row.get("break", ""),
+                    "raw_line": row.get("raw_line", ""),
+                })
+                log.append(f"Row {i}: missing end; hours set to 0.00")
+                continue
+            if t1 and not t0:
+                new_rows.append({
+                    "date": date,
+                    "start": start,
+                    "end": end,
+                    "hours": 0.0,
+                    "break": row.get("break", ""),
+                    "raw_line": row.get("raw_line", ""),
+                })
+                log.append(f"Row {i}: missing start; hours set to 0.00")
+                continue
 
-            if report_type == "A":
-                # Type A: generally shift start slightly later, end slightly later
-                start_delta = max(0, start_delta)  # 0, +5, +10
-                end_delta = max(0, end_delta)      # 0, +5, +10
-            elif report_type == "B":
-                # Type B: shift start earlier, end earlier
-                start_delta = min(0, start_delta)  # -10, -5, 0
-                end_delta = min(0, end_delta)      # -10, -5, 0
+            # Case 3: no valid times; keep hours if positive else 0.0
+            hours_clean = float(hours_val) if hours_val and hours_val > 0 else 0.0
+            new_rows.append({
+                "date": date,
+                "start": start,
+                "end": end,
+                "hours": round(hours_clean, 2),
+                "break": row.get("break", ""),
+                "raw_line": row.get("raw_line", ""),
+            })
+            log.append(f"Row {i}: no times; hours kept {hours_clean:.2f}")
 
-            t_start_new = t_start + timedelta(minutes=start_delta)
-            t_end_new = t_end + timedelta(minutes=end_delta)
-
-            # Ensure logical ordering: if end <= start, push end forward by 30-120 min deterministically
-            if t_end_new <= t_start_new:
-                fix_delta = 30 + (abs(deterministic_minutes(date_text, 3)) * 9)  # 30..120
-                t_end_new = t_start_new + timedelta(minutes=fix_delta)
-
-            # Compute hours with overnight handling
-            duration_hours = (t_end_new - t_start_new).total_seconds() / 3600.0
-            if duration_hours <= 0:
-                duration_hours += 24.0
-
-            # Clamp to realistic bounds
-            if duration_hours < 4.0:
-                bump = 4.0 - duration_hours
-                t_end_new += timedelta(hours=bump)
-                duration_hours = 4.0
-            elif duration_hours > 12.0:
-                reduce = duration_hours - 12.0
-                t_end_new -= timedelta(hours=reduce)
-                duration_hours = 12.0
-
-            new_start = t_start_new.strftime("%H:%M")
-            new_end = t_end_new.strftime("%H:%M")
-            new_hours = round(duration_hours, 2)
-
-            log.append(
-                f"Row {i} ({date_text}): {start_text}-{end_text} -> {new_start}-{new_end} ({new_hours}h)"
+        final_df = pd.DataFrame(new_rows)
+        final_df['weekday'] = final_df['date'].apply(self._hebrew_weekday)
+        if report_type == 'A':
+            final_df['is_sat'] = final_df.apply(
+                lambda r: 'כן' if r['weekday'] == 'שבת' else '',
+                axis=1
             )
-        else:
-            # If missing times, keep as-is but ensure hours is 0.0-8.0 deterministic
-            base_hours = row.get("hours", 0) or 0.0
-            if not isinstance(base_hours, (int, float)):
-                base_hours = 0.0
-            # Snap to deterministic bucket
-            bucket = (abs(deterministic_minutes(date_text, 4)) // 5)  # 0..2
-            fallback_hours = [6.0, 7.5, 8.0][bucket]
-            new_hours = round(base_hours if base_hours > 0 else fallback_hours, 2)
-            new_start = start_text
-            new_end = end_text
-            log.append(f"Row {i} ({date_text}): kept times, hours={new_hours}")
 
-        new_rows.append({
-            "date": date_text,
-            "start": new_start,
-            "end": new_end,
-            "hours": new_hours,
-        })
+        return final_df, log
 
-    return (df.__class__(new_rows), log)
+    @staticmethod
+    def _hebrew_weekday(date_text: str) -> str:
+        if not isinstance(date_text, str) or not date_text:
+            return ""
+        try:
+            names = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת", "ראשון"]
+            return names[datetime.strptime(date_text, '%Y-%m-%d').weekday()]
+        except (ValueError, IndexError):
+            return ""
