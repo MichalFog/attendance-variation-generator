@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  attendance-processor:
+    build: .
+    volumes:
+      # Mount input and output directories
+      - ./input_reports:/app/input_reports
+      - ./output_reports:/app/output_reports
+    # Run command (can override for single file processing)
+    command: python main.py
+

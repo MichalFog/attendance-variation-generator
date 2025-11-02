@@ -4,3 +4,4 @@ PyMuPDF
 Pillow
 reportlab
 pdfplumber
+python-bidi

@@ -16,7 +16,7 @@ class AttendanceVariationRules:
         def compute_hours(t0: datetime, t1: datetime) -> float:
             delta = (t1 - t0).total_seconds() / 3600
             if delta < 0:
-                delta += 24  # overnight
+                delta += 24
             return round(delta, 2)
 
         new_rows, log = [], []
@@ -29,7 +29,6 @@ class AttendanceVariationRules:
             t0 = parse_time(start)
             t1 = parse_time(end)
 
-            # Case 1: both times present and sensible → keep as-is
             if t0 and t1:
                 hours_computed = compute_hours(t0, t1)
                 if 0.25 <= hours_computed <= 16:
@@ -43,7 +42,6 @@ class AttendanceVariationRules:
                     })
                     log.append(f"Row {i}: kept {start}-{end} ({hours_computed:.2f}h)")
                     continue
-                # If out of range, minimally fix: ensure end after start by 30m
                 t1_fixed = t0 + timedelta(minutes=30)
                 hours_fixed = compute_hours(t0, t1_fixed)
                 new_rows.append({
@@ -57,7 +55,6 @@ class AttendanceVariationRules:
                 log.append(f"Row {i}: fixed end to {t1_fixed.strftime('%H:%M')} (was {end})")
                 continue
 
-            # Case 2: only one time present → keep time, hours 0.0
             if t0 and not t1:
                 new_rows.append({
                     "date": date,
@@ -81,7 +78,6 @@ class AttendanceVariationRules:
                 log.append(f"Row {i}: missing start; hours set to 0.00")
                 continue
 
-            # Case 3: no valid times; keep hours if positive else 0.0
             hours_clean = float(hours_val) if hours_val and hours_val > 0 else 0.0
             new_rows.append({
                 "date": date,

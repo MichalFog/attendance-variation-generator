@@ -1,5 +1,3 @@
-
-
 import os
 import sys
 from report_utils import AttendancePDFReader, AttendanceTableExtractor
@@ -7,28 +5,38 @@ from rules import AttendanceVariationRules
 from report_writer import AttendancePDFWriter
 
 def process_report(input_pdf: str, output_pdf: str):
-    """
-    Full processing pipeline for a single report (clean, no debug artifacts).
-    """
-    # 1. Read all pages from PDF
+    print(f"Processing: {input_pdf}")
     reader = AttendancePDFReader(input_pdf)
     first_page_text = reader.extract_text_first_page()
     all_pages_text = reader.extract_text_all_pages()
+    
+    if not all_pages_text or len(all_pages_text.strip()) < 10:
+        print(f"Warning: Extracted text is empty or too short from {input_pdf}")
+        print(f"First page text length: {len(first_page_text)}")
+        return
 
-    # 2. Extract structured data from the text
     extractor = AttendanceTableExtractor()
     df = extractor.extract_table_from_text(all_pages_text)
+    
+    if df.empty:
+        print(f"Warning: No dates/times found in extracted text from {input_pdf}")
+        print(f"Extracted text preview (first 500 chars): {all_pages_text[:500]}")
+        return
 
-    # 3. Detect report type and original columns
+    print(f"Extracted {len(df)} rows from {input_pdf}")
+
     report_type = extractor.detect_report_type(all_pages_text)
     header_flags = extractor.detect_columns(first_page_text)
 
-    # 4. Apply variation rules and enrich data
     df_var, _ = AttendanceVariationRules().apply(df, report_type)
+    
+    if df_var.empty:
+        print(f"Warning: DataFrame became empty after applying rules from {input_pdf}")
+        return
 
-    # 5. Write the final report
     writer = AttendancePDFWriter()
     writer.write(df_var, report_type, output_pdf, header_flags)
+    print(f"Successfully created: {output_pdf}")
 
 if __name__ == "__main__":
     input_dir = "input_reports"

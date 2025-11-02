@@ -1,36 +1,55 @@
 import os
 import pytesseract
-import fitz  # PyMuPDF
+import fitz
 import pandas as pd
 from PIL import Image
 from datetime import datetime
 import re
 
 class AttendancePDFReader:
-    """Reads a PDF file and extracts text from its pages using native text first, then OCR fallback."""
     def __init__(self, pdf_path):
         self.pdf_path = pdf_path
         self._configure_tesseract()
 
     def _configure_tesseract(self):
-        tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-        if os.path.isfile(tesseract_cmd):
+        tesseract_cmd = os.getenv('TESSERACT_CMD')
+        
+        if not tesseract_cmd or not os.path.isfile(tesseract_cmd):
+            standard_paths = [
+                '/usr/bin/tesseract',
+                '/usr/local/bin/tesseract',
+                '/opt/homebrew/bin/tesseract',
+            ]
+            for path in standard_paths:
+                if os.path.isfile(path):
+                    tesseract_cmd = path
+                    break
+        
+        if tesseract_cmd and os.path.isfile(tesseract_cmd):
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
             tessdata_dir = os.path.join(os.path.dirname(tesseract_cmd), 'tessdata')
-            os.environ['TESSDATA_PREFIX'] = tessdata_dir
+            if os.path.isdir(tessdata_dir):
+                os.environ['TESSDATA_PREFIX'] = tessdata_dir
+            else:
+                common_tessdata = [
+                    '/usr/share/tesseract-ocr/5/tessdata',
+                    '/usr/share/tesseract-ocr/4.00/tessdata',
+                    '/usr/local/share/tesseract-ocr/tessdata',
+                ]
+                for td_path in common_tessdata:
+                    if os.path.isdir(td_path):
+                        os.environ['TESSDATA_PREFIX'] = td_path
+                        break
 
     def _page_text_or_ocr(self, page_num: int) -> str:
-        """Try native text extraction; if empty/garbled, fallback to OCR."""
         doc = fitz.open(self.pdf_path)
         if page_num >= len(doc):
             doc.close(); return ""
         page = doc.load_page(page_num)
-        # 1) Native text
         try:
             native_text = page.get_text("text") or ""
         except Exception:
             native_text = ""
-        # Heuristic: if native text contains dates/times or has enough alphanum, accept
         if native_text:
             txt = native_text.strip()
             has_date = re.search(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", txt)
@@ -39,13 +58,19 @@ class AttendancePDFReader:
             if has_date or has_time or has_words:
                 doc.close()
                 return native_text
-        # 2) OCR fallback
         try:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            lang = 'heb+eng' if 'heb.traineddata' in os.listdir(os.getenv('TESSDATA_PREFIX', '')) else 'eng'
+            lang = 'eng'
+            tessdata_dir = os.getenv('TESSDATA_PREFIX', '')
+            if tessdata_dir and os.path.isdir(tessdata_dir):
+                try:
+                    if 'heb.traineddata' in os.listdir(tessdata_dir):
+                        lang = 'heb+eng'
+                except (OSError, PermissionError):
+                    pass
             ocr_text = pytesseract.image_to_string(img, lang=lang)
-        except Exception:
+        except Exception as e:
             ocr_text = native_text or ""
         doc.close()
         return ocr_text
@@ -60,12 +85,9 @@ class AttendancePDFReader:
         return "\n".join(self._page_text_or_ocr(i) for i in range(n))
 
 class AttendanceTableExtractor:
-    """Extracts a structured DataFrame from raw OCR/native text."""
     def extract_table_from_text(self, ocr_text: str) -> pd.DataFrame:
-        # Parse lines
         all_lines = ocr_text.splitlines()
 
-        # Collect dates with line indices
         date_positions: list[tuple[int, str]] = []
         for i, line in enumerate(all_lines):
             d = self._find_date(line)
@@ -74,15 +96,12 @@ class AttendanceTableExtractor:
         if not date_positions:
             return pd.DataFrame(columns=["date", "start", "end", "hours", "raw_line"])
 
-        # Collect all time tokens in order and detect repetitions
         times_ordered: list[str] = []
         for line in all_lines:
             times = self._find_times(line)
             if times:
                 times_ordered.extend(times)
 
-        # Heuristic: if we see long runs of identical times (e.g., many 08:00 then many 15:00)
-        # we assume "block mode" where starts are listed as a block followed by ends as a block
         def longest_run(tokens: list[str]) -> int:
             if not tokens: return 0
             best, cur, prev = 1, 1, tokens[0]
@@ -99,7 +118,6 @@ class AttendanceTableExtractor:
 
         rows = []
         if is_block_mode:
-            # Block mapping: first N times are starts, next N are ends, optional next N are breaks
             starts = times_ordered[:num_dates]
             ends = times_ordered[num_dates:num_dates * 2]
             breaks = times_ordered[num_dates * 2:num_dates * 3]
@@ -123,13 +141,10 @@ class AttendanceTableExtractor:
                 })
             return pd.DataFrame(rows)
 
-        # Per-date window mode: for each date, look until the next date
         for idx, (date_line_idx, date_str) in enumerate(date_positions):
             next_date_idx = date_positions[idx + 1][0] if idx + 1 < num_dates else len(all_lines)
             window_start = max(0, date_line_idx - 5)
             window_end = next_date_idx
-
-            # Collect times in window
             window_times: list[str] = []
             for i in range(window_start, window_end):
                 ts = self._find_times(all_lines[i])
@@ -198,9 +213,7 @@ class AttendanceTableExtractor:
         }
 
     def detect_report_type(self, text: str) -> str:
-        # Structural heuristics: Type A has a long list of dates and separate blocks of repeated times
         lines = text.splitlines()
-        # Count dates
         date_count = 0
         times_all: list[str] = []
         for line in lines:
@@ -223,7 +236,6 @@ class AttendanceTableExtractor:
             return best
 
         run = longest_run(times_all)
-        # Heuristic thresholds
         if date_count >= 10 and run >= max(3, date_count // 4):
             return 'A'
         return 'B'
@@ -232,10 +244,48 @@ def get_hebrew_font():
     try:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        candidates = [
-            ("Arial", r"C:\\Windows\\Fonts\\arial.ttf"),
-            ("DejaVuSans", r"C:\\Windows\\Fonts\\DejaVuSans.ttf"),
-        ]
+        import platform
+        
+        system = platform.system()
+        candidates = []
+        
+        if system == "Windows":
+            fonts_dir = os.path.join(os.getenv("WINDIR", "C:\\Windows"), "Fonts")
+            candidates = [
+                ("Arial", os.path.join(fonts_dir, "arial.ttf")),
+                ("Arial", os.path.join(fonts_dir, "Arial.ttf")),
+                ("DejaVuSans", os.path.join(fonts_dir, "DejaVuSans.ttf")),
+            ]
+        elif system == "Darwin":
+            fonts_dirs = [
+                "/Library/Fonts",
+                os.path.expanduser("~/Library/Fonts"),
+                "/System/Library/Fonts",
+            ]
+            for fonts_dir in fonts_dirs:
+                if os.path.isdir(fonts_dir):
+                    candidates.extend([
+                        ("Arial", os.path.join(fonts_dir, "Arial.ttf")),
+                        ("DejaVuSans", os.path.join(fonts_dir, "DejaVuSans.ttf")),
+                    ])
+        else:
+            fonts_dirs = [
+                "/usr/share/fonts/truetype/dejavu",
+                "/usr/share/fonts/truetype/liberation",
+                "/usr/share/fonts/TTF",
+                "/usr/share/fonts",
+                "/usr/local/share/fonts",
+                os.path.expanduser("~/.fonts"),
+            ]
+            for fonts_dir in fonts_dirs:
+                if os.path.isdir(fonts_dir):
+                    candidates.extend([
+                        ("Arial", os.path.join(fonts_dir, "Arial.ttf")),
+                        ("LiberationSans", os.path.join(fonts_dir, "LiberationSans-Regular.ttf")),
+                        ("DejaVuSans", os.path.join(fonts_dir, "DejaVuSans.ttf")),
+                        ("DejaVuSans", os.path.join(fonts_dir, "DejaVuSans-Regular.ttf")),
+                    ])
+        
         for name, path in candidates:
             if os.path.exists(path):
                 pdfmetrics.registerFont(TTFont(name, path))
